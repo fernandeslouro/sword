@@ -1,6 +1,7 @@
 from supportlib.sensor_position_finding import SensorPositionRequester
 from supportlib.data_types import Sensor, SensorPosition
 from supportlib.file_reading import iterate_sensor_data
+from solution import SolutionPositionFinder
 
 MOVEMENT_DATA_FILE_PATH = "resources/sensor_data.csv"
 N_TRACKERS = 5
@@ -17,7 +18,8 @@ CORRECT_POSITIONS = {
 class SensorPositionFinderTester(SensorPositionRequester):
 
     def __init__(self):
-        self.position_finder = None  # TODO instantiate your top class here
+        #myrequester = SolutionPositionRequester()
+        self.position_finder = SolutionPositionFinder(self)
         self.sensor_positions = dict()
         self.finished = False
 
