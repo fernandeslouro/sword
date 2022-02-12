@@ -152,25 +152,21 @@ def data_aggregations(data_array):
     """
     Some data aggregations are necessary to implement our algorith:
      - Average x, y, z, acc values
+     - Rows are each of the sensors
+     - Columns are the values of x, y, z, a
     """
-    try:
+    if len(np.shape(data_array)) == 3:
         averages = np.zeros((5,4))
-        print(np.mean(data_array[0,0,:]))
-        for i in np.shape(data_array)[0]:
+        for i in range(5):
             averages[i,:] = [np.mean(data_array[0,0,:]),
                         np.mean(data_array[0,1,:]),
                         np.mean(data_array[0,2,:]),
                         np.mean(data_array[0,3,:])]
-            print(np.shape(averages))
-        print(np.shape(averages))
-        return averages
-    except:
-        return 0
+    else:
+        averages = np.zeros((5,4))
+    return averages
 
 past_data = np.array([])
 for data_dict in iterate_sensor_data("resources/sensor_data.csv",5):
     past_data = update_past_data(data_dict, past_data)
     aggs = data_aggregations(past_data)
-    print(np.shape(aggs), np.shape(past_data))
-
-    
