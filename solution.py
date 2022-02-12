@@ -3,6 +3,7 @@ from supportlib.data_types import Sensor, SensorPosition, SensorData
 from typing import Dict
 from supportlib.data_types import SensorPosition
 import numpy as np
+from supportlib.file_reading import iterate_sensor_data
 
 
 CORRECT_POSITIONS = {
@@ -15,7 +16,9 @@ CORRECT_POSITIONS = {
 
 class SolutionPositionFinder(SensorPositionFinder):
 
+    N = 50
     current_sample = 0
+    past_data = np.array([])
 
     def __init__(self, position_requester: SensorPositionRequester):
         """
@@ -34,10 +37,77 @@ class SolutionPositionFinder(SensorPositionFinder):
         """
 
         # TODO: implement a better algorithm
-        self.initial_naive_solution(sensor_data)
+        #self.initial_naive_solution(sensor_data)
+
+        self.past_data, _ = self.position_acceleration_solution(sensor_data, self.past_data)
 
 
 
+    def position_acceleration_solution(self, dict_data, data_array):
+        """
+        A more robust solution. When it detects a sensor with values of z close to 0
+        and values of x close to 1, it assigns the sensor to the right/left thigh, 
+        depending on whether the movement has been detected before. At the same time,
+        we expect the shank of the same leg to be rising with the thigh. However, 
+        there is the chance the shank stays in a mostly upright position, with no
+        visible change on x, y or z. However, the shank sensor would have the highest 
+        acceleration value of all the other sensors, so it can be identified as well.
+        It keeps a rolling window of 100 counts
+        :param sensor_data: a dict containing sensor data as values and the
+        corresponding sensors as keys
+        :param past_data: numpy array of dimensions 5 x N x 4, holding past values for
+        all the data.
+        """
+
+        data_array = self.update_past_data(dict_data, data_array)
+        aggs = self.data_aggregations(data_array)
+        return data_array, aggs
+    
+
+
+    def update_past_data(self, dict_data, data_array):
+        """
+        Converts the dict provided by the generator into a numpy array of 5 x 4 x 1,
+        to be appended to the past_data numpy array
+        :param dict_data: dictionary corresponding each sensor to the orientation
+        vector and the acceleration value
+        :param arr: the array to apend to, which contains the past data
+        """
+        to_append = np.zeros((5,4))
+
+        for sensor, values in dict_data.items():
+            single_sensor = np.append(values.vec, values.acc)
+            np.reshape(single_sensor, (1,4))
+            to_append[sensor.value-1] = single_sensor
+
+        if data_array.size==0:
+            data_array = to_append
+        elif np.shape(data_array) == (5,4):
+            data_array = np.stack((data_array, to_append), axis=2)
+        elif np.shape(data_array)[2] < self.N:
+            data_array = np.append(data_array, np.atleast_3d(to_append), axis=2)
+        elif np.shape(data_array)[2] == self.N:
+            data_array = np.append(data_array, np.atleast_3d(to_append), axis=2)
+            data_array = data_array[:,:,1:]
+        return data_array
+        
+    def data_aggregations(self, data_array):
+        """
+        Some data aggregations are necessary to implement our algorith:
+        - Average x, y, z, acc values
+        - Rows are each of the sensors
+        - Columns are the values of x, y, z, a
+        """
+        if len(np.shape(data_array)) == 3:
+            averages = np.zeros((5,4))
+            for i in range(5):
+                averages[i,:] = [np.mean(data_array[0,0,:]),
+                            np.mean(data_array[0,1,:]),
+                            np.mean(data_array[0,2,:]),
+                            np.mean(data_array[0,3,:])]
+        else:
+            averages = np.zeros((5,4))
+        return averages
 
     def initial_naive_solution(self,
                              sensor_data: Dict[Sensor, SensorData], verbose=False):
@@ -96,77 +166,6 @@ class SolutionPositionFinder(SensorPositionFinder):
 # %%
 
 
-from supportlib.file_reading import iterate_sensor_data
-import numpy as np
 
-N = 50
 
-def position_acceleration_solution(dict_data, data_array):
-    """
-    A more robust solution. When it detects a sensor with values of z close to 0
-    and values of x close to 1, it assigns the sensor to the right/left thigh, 
-    depending on whether the movement has been detected before. At the same time,
-    we expect the shank of the same leg to be rising with the thigh. However, 
-    there is the chance the shank stays in a mostly upright position, with no
-    visible change on x, y or z. However, the shank sensor would have the highest 
-    acceleration value of all the other sensors, so it can be identified as well.
-    It keeps a rolling window of 100 counts
-    :param sensor_data: a dict containing sensor data as values and the
-    corresponding sensors as keys
-    :param past_data: numpy array of dimensions 5 x N x 4, holding past values for
-    all the data.
-    """
-
-    # move here what I'm putting inside the loop
-    pass
-    
-
-def update_past_data(dict_data, data_array):
-    """
-    Converts the dict provided by the generator into a numpy array of 5 x 4 x 1,
-    to be appended to the past_data numpy array
-    :param dict_data: dictionary corresponding each sensor to the orientation
-    vector and the acceleration value
-    :param arr: the array to apend to, which contains the past data
-    """
-    to_append = np.zeros((5,4))
-
-    for sensor, values in dict_data.items():
-        single_sensor = np.append(values.vec, values.acc)
-        np.reshape(single_sensor, (1,4))
-        to_append[sensor.value-1] = single_sensor
-
-    if data_array.size==0:
-        data_array = to_append
-    elif np.shape(data_array) == (5,4):
-        data_array = np.stack((data_array, to_append), axis=2)
-    elif np.shape(data_array)[2] < N:
-        data_array = np.append(data_array, np.atleast_3d(to_append), axis=2)
-    elif np.shape(data_array)[2] == N:
-        data_array = np.append(data_array, np.atleast_3d(to_append), axis=2)
-        data_array = data_array[:,:,1:]
-    return data_array
-    
-
-def data_aggregations(data_array):
-    """
-    Some data aggregations are necessary to implement our algorith:
-     - Average x, y, z, acc values
-     - Rows are each of the sensors
-     - Columns are the values of x, y, z, a
-    """
-    if len(np.shape(data_array)) == 3:
-        averages = np.zeros((5,4))
-        for i in range(5):
-            averages[i,:] = [np.mean(data_array[0,0,:]),
-                        np.mean(data_array[0,1,:]),
-                        np.mean(data_array[0,2,:]),
-                        np.mean(data_array[0,3,:])]
-    else:
-        averages = np.zeros((5,4))
-    return averages
-
-past_data = np.array([])
-for data_dict in iterate_sensor_data("resources/sensor_data.csv",5):
-    past_data = update_past_data(data_dict, past_data)
-    aggs = data_aggregations(past_data)
+#for data_dict in iterate_sensor_data("resources/sensor_data.csv",5):
