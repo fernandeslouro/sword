@@ -62,7 +62,9 @@ for p in pairs:
 
 for p in pairs:
     plt.figure(figsize=(10, 10))
-    plt.plot(df_merged[f"angle_{p[0]}_{p[1]}"])
+    plt.plot(df_merged[f"angle_{p[0]}_{p[1]}"] * 57.2958)
+    plt.title(f"Sensor {p[0]} - Sensor {p[1]}")
+    plt.savefig(f"plots/s{p[0]}_s{p[1]}.png")
 # %%
 
 

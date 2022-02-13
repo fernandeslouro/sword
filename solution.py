@@ -1,3 +1,4 @@
+from tkinter import N
 from supportlib.sensor_position_finding import (
     SensorPositionFinder,
     SensorPositionRequester,
@@ -8,6 +9,7 @@ from typing import Dict
 from enum import Enum
 import numpy as np
 import itertools
+import math
 
 N_TRACKERS = 5
 
@@ -59,13 +61,13 @@ class SolutionPositionFinder(SensorPositionFinder):
         :param sensor_data: a dict containing sensor data as values and the
         corresponding sensors as keys
         """
-        # TODO: Consider adding a kalman filter to the acceleration
 
         # Get data from latest sample into rolling window and calculating aggregations
         self.past_data, self.past_angles = self.rolling_windows(
             sensor_data, self.past_data, self.past_angles
         )
-        aggs = data_aggregations(self.past_data)
+        data_aggs = data_aggregations(self.past_data)
+        angle_aggs = angle_aggregations(self.past_angles)
 
         for sensor in self.unassigned_sensors():
             n_sensor = sensor.value
@@ -81,7 +83,8 @@ class SolutionPositionFinder(SensorPositionFinder):
                 # and the sensor with the highest average acceleration in the rolling window
                 # will be the shank of the same leg. These values are an heuristic, but seem
                 # to work well.
-                if aggs[n_sensor - 1, 2] > -0.2 and aggs[n_sensor - 1, 0] > 0.7:
+                if self.is_thigh_raised(data_aggs, angle_aggs, n_sensor):
+                    print("detected thigh raise")
                     if self.mov_state == MovementState.BEFORE_RIGHT_RAISE:
                         # If no legs have been raised yet, the raised thigh and shank are the
                         # ones of the right leg. We also swithc to the next movement state.
@@ -98,30 +101,16 @@ class SolutionPositionFinder(SensorPositionFinder):
                     self.position_requester.on_sensor_position_found(
                         Sensor(n_sensor), thigh_rising
                     )
-                    # We then get the average acceleration of the 5 sensors from the aggregations
-                    # array, in order to find the sensor with the highest acceleration out of the
-                    # others.
-                    accelerations = aggs[:, -1]
-                    max_acc_sensor = np.argsort(accelerations)[-1] + 1
-                    if max_acc_sensor == n_sensor:
-                        max_acc_sensor = np.argsort(accelerations)[-2] + 1
-                    if (
-                        Sensor(max_acc_sensor)
-                        in self.position_requester.sensor_positions.keys()
-                    ):
-                        raise ValueError(
-                            "The segment thought to be the shank has already been assigned. This\
-                             is based on an assumption related to the shank being the highest\
-                             acceleration segment, which may not hold up."
-                        )
+
+                    raised_shank_sensor = self.find_raised_shank(data_aggs, n_sensor)
+
                     self.position_requester.on_sensor_position_found(
-                        Sensor(max_acc_sensor), shank_rising
+                        Sensor(raised_shank_sensor), shank_rising
                     )
             else:
                 if (
                     self.mov_state == MovementState.DURING_RIGHT_RAISE
-                    and aggs[n_sensor - 1, 2] < -0.7
-                    and aggs[n_sensor - 1, 0] < 0.3
+                    and not self.is_thigh_raised(data_aggs, angle_aggs, n_sensor)
                 ):
                     # If after raising the right leg, the right thigh sensor returns
                     # to a position closed to vertical (on x and z), we consider that
@@ -220,6 +209,55 @@ class SolutionPositionFinder(SensorPositionFinder):
         assigned_sensors = set(self.position_requester.sensor_positions.keys())
         return list(all_sensors - assigned_sensors)
 
+    def is_thigh_raised(
+        self,
+        data_aggregations: np.array,
+        angle_aggregations: np.array,
+        sensor_number: int,
+        method="angles",
+    ) -> bool:
+        """
+        Support functions to access the sliding window angles data. Since we are
+        using numpy arrays, the position of the pairs of angles is not clear. This
+        function outputs the columns which correspond to angles where the input
+        sensor is present.
+        :param angles_array: sliding window array of past angles
+        """
+        thigh_raised = True
+        if method in ["angles", "both"]:
+            pairs = list(itertools.combinations(range(1, N_TRACKERS + 1), 2))
+            relevant_angles_indices = [
+                i for i, p in enumerate(pairs) if sensor_number in p
+            ]
+
+            for angle_index in relevant_angles_indices:
+                if angle_aggregations[angle_index] < 80:
+                    thigh_raised &= False
+        if method in ["vector_values", "both"]:
+            if (
+                data_aggregations[sensor_number - 1, 2] < -0.2
+                or data_aggregations[sensor_number - 1, 0] < 0.7
+            ):
+                thigh_raised = False
+
+        return thigh_raised
+
+    def find_raised_shank(self, data_aggregations: np.array, n_sensor: int) -> int:
+        # We then get the average acceleration of the 5 sensors from the aggregations
+        # array, in order to find the sensor with the highest acceleration out of the
+        # others.
+        accelerations = data_aggregations[:, -1]
+        max_acc_sensor = np.argsort(accelerations)[-1] + 1
+        if max_acc_sensor == n_sensor:
+            max_acc_sensor = np.argsort(accelerations)[-2] + 1
+        if Sensor(max_acc_sensor) in self.position_requester.sensor_positions.keys():
+            raise ValueError(
+                "The segment thought to be the shank has already been assigned. This\
+                    is based on an assumption related to the shank being the highest\
+                    acceleration segment, which may not hold up."
+            )
+        return max_acc_sensor
+
 
 def data_aggregations(data_array: np.array, chosen_agg="mean") -> np.array:
     """
@@ -234,36 +272,48 @@ def data_aggregations(data_array: np.array, chosen_agg="mean") -> np.array:
     :return: a 5 x 4 matrix with the containing the results of the chosed aggregation
     performed on the rolling window data.
     """
+    aggregation = np.zeros((N_TRACKERS, 4))
+
     if len(np.shape(data_array)) == 3:
-        aggregation = np.zeros((N_TRACKERS, 4))
         if chosen_agg == "mean":
             for i in range(N_TRACKERS):
-                aggregation[i, :] = [
-                    np.mean(data_array[i, 0, :]),
-                    np.mean(data_array[i, 1, :]),
-                    np.mean(data_array[i, 2, :]),
-                    np.mean(data_array[i, 3, :]),
-                ]
+                aggregation[i, :] = [np.mean(data_array[i, val, :]) for val in range(4)]
         elif chosen_agg == "std":
             for i in range(N_TRACKERS):
-                aggregation[i, :] = [
-                    np.std(data_array[i, 0, :]),
-                    np.std(data_array[i, 1, :]),
-                    np.std(data_array[i, 2, :]),
-                    np.std(data_array[i, 3, :]),
-                ]
+                aggregation[i, :] = [np.mean(data_array[i, val, :]) for val in range(4)]
         else:
             raise ValueError("Only supported aggregations are 'mean' and 'std'")
-    else:
-        aggregation = np.zeros((N_TRACKERS, 4))
     return aggregation
 
 
-def angle_between(v1, v2):
+def angle_aggregations(angles_array: np.array, chosen_agg="mean") -> np.array:
     """
-    Returns the unit vector of the vector.
-    Returns the angle in radians between vectors 'v1' and 'v2':
+    :param chosen_agg: string with the chosen aggregation to perform on the rolling
+    :return:
+    """
+    aggregation = np.zeros((10))
+
+    if len(np.shape(angles_array)) == 2:
+        if chosen_agg == "mean":
+            aggregation = [np.mean(angles_array[:, val]) for val in range(10)]
+        elif chosen_agg == "std":
+            aggregation = [np.mean(angles_array[:, val]) for val in range(10)]
+        else:
+            raise ValueError("Only supported aggregations are 'mean' and 'std'")
+    return aggregation
+
+
+def angle_between(v1, v2, deg=True):
+    """
+    Calculates the angle between two 3D vectors. It starts by
+    calculating the unit vector of each vector.
+    :param v1: the first vector
+    :param v2: the second vector
+    :return; the angle between vectors 'v1' and 'v2':
     """
     v1_u = v1 / np.linalg.norm(v1)
     v2_u = v2 / np.linalg.norm(v2)
-    return np.arccos(np.clip(np.dot(v1_u, v2_u), -1.0, 1.0))
+    angle = np.arccos(np.clip(np.dot(v1_u, v2_u), -1.0, 1.0))
+    if deg:
+        angle *= 180 / math.pi
+    return angle
