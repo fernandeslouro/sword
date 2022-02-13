@@ -11,9 +11,9 @@ class SensorPositionRequester(ABC):
     """
 
     @abstractmethod
-    def on_sensor_position_found(self,
-                                 sensor: Sensor,
-                                 position: SensorPosition) -> None:
+    def on_sensor_position_found(
+        self, sensor: Sensor, position: SensorPosition
+    ) -> None:
         """
         Callback called when a position of a given sensor is identified.
         :param sensor: the sensor whose position was identified
@@ -44,8 +44,7 @@ class SensorPositionFinder(ABC):
         self.position_requester = position_requester
 
     @abstractmethod
-    def on_new_sensor_sample(self,
-                             sensor_data: Dict[Sensor, SensorData]) -> None:
+    def on_new_sensor_sample(self, sensor_data: Dict[Sensor, SensorData]) -> None:
         """
         Callback called each time a new sample is received from the sensors
         :param sensor_data: a dict containing sensor data as values and the

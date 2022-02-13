@@ -11,21 +11,18 @@ CORRECT_POSITIONS = {
     Sensor.SENSOR_2: SensorPosition.CHEST,
     Sensor.SENSOR_3: SensorPosition.LEFT_THIGH,
     Sensor.SENSOR_4: SensorPosition.LEFT_SHANK,
-    Sensor.SENSOR_5: SensorPosition.RIGHT_THIGH
+    Sensor.SENSOR_5: SensorPosition.RIGHT_THIGH,
 }
 
 
 class SensorPositionFinderTester(SensorPositionRequester):
-
     def __init__(self):
-        #myrequester = SolutionPositionRequester()
         self.position_finder = SolutionPositionFinder(self)
         self.sensor_positions = dict()
         self.finished = False
 
     def run(self):
-        for data_dict in iterate_sensor_data(MOVEMENT_DATA_FILE_PATH,
-                                             N_TRACKERS):
+        for data_dict in iterate_sensor_data(MOVEMENT_DATA_FILE_PATH, N_TRACKERS):
             self.position_finder.on_new_sensor_sample(data_dict)
 
             if self.finished:
@@ -34,9 +31,9 @@ class SensorPositionFinderTester(SensorPositionRequester):
         if not self.finished:
             print("EOF reached before on_finish was called")
 
-    def on_sensor_position_found(self,
-                                 sensor: Sensor,
-                                 position: SensorPosition) -> None:
+    def on_sensor_position_found(
+        self, sensor: Sensor, position: SensorPosition
+    ) -> None:
         print(f"{sensor}'s position identified as {position}")
         self.sensor_positions[sensor] = position
 
