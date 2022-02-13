@@ -7,6 +7,9 @@ from supportlib.data_types import SensorPosition
 from typing import Dict
 from enum import Enum
 import numpy as np
+import itertools
+
+N_TRACKERS = 5
 
 
 class MovementState(Enum):
@@ -19,6 +22,7 @@ class MovementState(Enum):
 class SolutionPositionFinder(SensorPositionFinder):
 
     past_data = np.array([])
+    past_angles = np.array([])
     mov_state = MovementState(1)
 
     def __init__(self, position_requester: SensorPositionRequester, rolling_agg=50):
@@ -58,7 +62,9 @@ class SolutionPositionFinder(SensorPositionFinder):
         # TODO: Consider adding a kalman filter to the acceleration
 
         # Get data from latest sample into rolling window and calculating aggregations
-        self.past_data = self.update_past_data(sensor_data, self.past_data)
+        self.past_data, self.past_angles = self.rolling_windows(
+            sensor_data, self.past_data, self.past_angles
+        )
         aggs = data_aggregations(self.past_data)
 
         for sensor in self.unassigned_sensors():
@@ -131,11 +137,16 @@ class SolutionPositionFinder(SensorPositionFinder):
             )
             self.position_requester.on_finish()
 
-    def update_past_data(
-        self, dict_data: Dict[Sensor, SensorData], data_array: np.array
-    ) -> None:
+    def rolling_windows(
+        self,
+        dict_data: Dict[Sensor, SensorData],
+        data_array: np.array,
+        angles_array: np.array,
+    ) -> (np.array, np.array):
         """
-        Creates an array containing a rolling window of past samples' data. This
+        Creates an array containing a rolling window of past samples' data. We
+        always take action based on rolling window aggregations as opposed to
+        individual values of samples, to add robstness. This
         array has dimensions 5 (number of sensors) x 4 (x, y, z, a) x 50
         (rolling_agg). We start by getting the 5 x 4 array of the current sample.
         We then append it to the array containing the past data, which is empty
@@ -144,7 +155,8 @@ class SolutionPositionFinder(SensorPositionFinder):
         vector and the acceleration value
         :param arr: the array to apend to, which contains the past data
         """
-        to_append = np.zeros((5, 4))
+        # TODO: add comments related to angles
+        data_to_append = np.zeros((N_TRACKERS, 4))
 
         # The data is extracted from the dict provided by the generator from
         # iterate_sensor_data. It starts by exracting the data from the dict into a
@@ -152,7 +164,29 @@ class SolutionPositionFinder(SensorPositionFinder):
         for sensor, values in dict_data.items():
             single_sensor = np.append(values.vec, values.acc)
             np.reshape(single_sensor, (1, 4))
-            to_append[sensor.value - 1] = single_sensor
+            data_to_append[sensor.value - 1] = single_sensor
+
+        pairs = list(itertools.combinations(range(N_TRACKERS), 2))
+        # Pairs are generated in a sorted manner. So we can always know where a
+        # specific pair is in the numpy array.
+        angles_to_append = np.zeros((len(pairs)))
+        for i, p in enumerate(pairs):
+            angles_to_append[i] = angle_between(
+                np.array(
+                    (
+                        data_to_append[p[0], 0],
+                        data_to_append[p[0], 1],
+                        data_to_append[p[0], 2],
+                    )
+                ),
+                np.array(
+                    (
+                        data_to_append[p[1], 0],
+                        data_to_append[p[1], 1],
+                        data_to_append[p[1], 2],
+                    )
+                ),
+            )
 
         # Since we are starting from an empty array, the commands to joing a 5 x 4
         # array with the previous data changes, according to the shape of the data.
@@ -160,15 +194,21 @@ class SolutionPositionFinder(SensorPositionFinder):
         # but when the third dimension gets to 50, we must start removing the older
         # data.
         if data_array.size == 0:
-            data_array = to_append
-        elif np.shape(data_array) == (5, 4):
-            data_array = np.stack((data_array, to_append), axis=2)
+            data_array = data_to_append
+            angles_array = angles_to_append
+        elif np.shape(data_array) == (N_TRACKERS, 4):
+            data_array = np.stack((data_array, data_to_append), axis=2)
+            angles_array = np.stack((angles_array, angles_to_append))
         elif np.shape(data_array)[2] < self.rolling_agg:
-            data_array = np.append(data_array, np.atleast_3d(to_append), axis=2)
+            data_array = np.append(data_array, np.atleast_3d(data_to_append), axis=2)
+            angles_array = np.vstack((angles_array, angles_to_append))
         elif np.shape(data_array)[2] == self.rolling_agg:
-            data_array = np.append(data_array, np.atleast_3d(to_append), axis=2)
+            data_array = np.append(data_array, np.atleast_3d(data_to_append), axis=2)
             data_array = data_array[:, :, 1:]
-        return data_array
+            angles_array = np.vstack((angles_array, angles_to_append))
+            angles_array = angles_array[1:, :]
+
+        return data_array, angles_array
 
     def unassigned_sensors(self) -> list(Sensor):
         """
@@ -195,9 +235,9 @@ def data_aggregations(data_array: np.array, chosen_agg="mean") -> np.array:
     performed on the rolling window data.
     """
     if len(np.shape(data_array)) == 3:
-        aggregation = np.zeros((5, 4))
+        aggregation = np.zeros((N_TRACKERS, 4))
         if chosen_agg == "mean":
-            for i in range(5):
+            for i in range(N_TRACKERS):
                 aggregation[i, :] = [
                     np.mean(data_array[i, 0, :]),
                     np.mean(data_array[i, 1, :]),
@@ -205,7 +245,7 @@ def data_aggregations(data_array: np.array, chosen_agg="mean") -> np.array:
                     np.mean(data_array[i, 3, :]),
                 ]
         elif chosen_agg == "std":
-            for i in range(5):
+            for i in range(N_TRACKERS):
                 aggregation[i, :] = [
                     np.std(data_array[i, 0, :]),
                     np.std(data_array[i, 1, :]),
@@ -215,5 +255,15 @@ def data_aggregations(data_array: np.array, chosen_agg="mean") -> np.array:
         else:
             raise ValueError("Only supported aggregations are 'mean' and 'std'")
     else:
-        aggregation = np.zeros((5, 4))
+        aggregation = np.zeros((N_TRACKERS, 4))
     return aggregation
+
+
+def angle_between(v1, v2):
+    """
+    Returns the unit vector of the vector.
+    Returns the angle in radians between vectors 'v1' and 'v2':
+    """
+    v1_u = v1 / np.linalg.norm(v1)
+    v2_u = v2 / np.linalg.norm(v2)
+    return np.arccos(np.clip(np.dot(v1_u, v2_u), -1.0, 1.0))

@@ -2,7 +2,9 @@
 import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
+from functools import reduce
 import statistics
+import itertools
 
 plt.style.use("fivethirtyeight")
 # %%
@@ -25,6 +27,42 @@ def angle_between(v1, v2):
     return np.arccos(np.clip(np.dot(v1_u, v2_u), -1.0, 1.0))
 
 
+dict_dfs = {}
+for i in range(1, 6):
+    dict_dfs[i] = mov[mov.sensor == i].add_suffix(f"_{i}")
+    dict_dfs[i] = dict_dfs[i].drop([f"sensor_{i}"], axis=1)
+    dict_dfs[i] = dict_dfs[i].rename(columns={f"sample_index_{i}": "sample_index"})
+
+data_frames = [dict_dfs[i] for i in range(1, 6)]
+
+df_merged = reduce(
+    lambda left, right: pd.merge(left, right, on=["sample_index"], how="outer"),
+    data_frames,
+)
+
+# %%
+pairs = list(itertools.combinations(range(1, 6), 2))
+for p in pairs:
+    df_merged[f"angle_{p[0]}_{p[1]}"] = df_merged.apply(
+        lambda row: angle_between(
+            [
+                row[f"vec_x_{p[0]}"],
+                row[f"vec_y_{p[0]}"],
+                row[f"vec_z_{p[0]}"],
+            ],
+            [
+                row[f"vec_x_{p[1]}"],
+                row[f"vec_y_{p[1]}"],
+                row[f"vec_z_{p[1]}"],
+            ],
+        ),
+        axis=1,
+    )
+
+
+for p in pairs:
+    plt.figure(figsize=(10, 10))
+    plt.plot(df_merged[f"angle_{p[0]}_{p[1]}"])
 # %%
 
 
