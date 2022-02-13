@@ -1,24 +1,26 @@
-from supportlib.sensor_position_finding import SensorPositionFinder, SensorPositionRequester
+from supportlib.sensor_position_finding import (
+    SensorPositionFinder,
+    SensorPositionRequester,
+)
 from supportlib.data_types import Sensor, SensorPosition, SensorData
-from typing import Dict
 from supportlib.data_types import SensorPosition
+from typing import Dict
+from enum import Enum
 import numpy as np
-from supportlib.file_reading import iterate_sensor_data
 
 
-CORRECT_POSITIONS = {
-    Sensor.SENSOR_1: SensorPosition.RIGHT_SHANK,
-    Sensor.SENSOR_2: SensorPosition.CHEST,
-    Sensor.SENSOR_3: SensorPosition.LEFT_THIGH,
-    Sensor.SENSOR_4: SensorPosition.LEFT_SHANK,
-    Sensor.SENSOR_5: SensorPosition.RIGHT_THIGH
-}
+class MovementState(Enum):
+    BEFORE_RIGHT_RAISE = 1
+    DURING_RIGHT_RAISE = 2
+    BEFORE_LEFT_RAISE = 3
+    DURING_LEFT_RAISE = 4
+
 
 class SolutionPositionFinder(SensorPositionFinder):
 
     N = 50
-    current_sample = 0
     past_data = np.array([])
+    mov_state = MovementState(1)
 
     def __init__(self, position_requester: SensorPositionRequester):
         """
@@ -28,42 +30,84 @@ class SolutionPositionFinder(SensorPositionFinder):
         """
         self.position_requester = position_requester
 
-    def on_new_sensor_sample(self,
-                             sensor_data: Dict[Sensor, SensorData]) -> None:
+    def on_new_sensor_sample(self, sensor_data: Dict[Sensor, SensorData]) -> None:
         """
         Callback called each time a new sample is received from the sensors
         :param sensor_data: a dict containing sensor data as values and the
         corresponding sensors as keys
         """
 
-        # TODO: implement a better algorithm
-        #self.initial_naive_solution(sensor_data)
-
-        self.past_data, _ = self.position_acceleration_solution(sensor_data, self.past_data)
-
-
+        self.past_data, _ = self.position_acceleration_solution(
+            sensor_data, self.past_data
+        )
 
     def position_acceleration_solution(self, dict_data, data_array):
         """
         A more robust solution. When it detects a sensor with values of z close to 0
-        and values of x close to 1, it assigns the sensor to the right/left thigh, 
+        and values of x close to 1, it assigns the sensor to the right/left thigh,
         depending on whether the movement has been detected before. At the same time,
-        we expect the shank of the same leg to be rising with the thigh. However, 
+        we expect the shank of the same leg to be rising with the thigh. However,
         there is the chance the shank stays in a mostly upright position, with no
-        visible change on x, y or z. However, the shank sensor would have the highest 
+        visible change on x, y or z. However, the shank sensor would have the highest
         acceleration value of all the other sensors, so it can be identified as well.
+        In order to separate the second movement from the first, a flag is created,
+        signaling the values of e.g. x and z are still "high" because of a movement
+        already detected. When the values drop to an acceptable level again, we are
+        ready to pick up the movements of the left leg.
         It keeps a rolling window of 100 counts
         :param sensor_data: a dict containing sensor data as values and the
         corresponding sensors as keys
-        :param past_data: numpy array of dimensions 5 x N x 4, holding past values for
+        :param past_data: numpy array of dimensions 5 x 4 x N, holding past values for
         all the data.
         """
-
+        # TODO: Update comment
+        # TODO: Add comments explaining the bottom part
         data_array = self.update_past_data(dict_data, data_array)
         aggs = self.data_aggregations(data_array)
-        return data_array, aggs
-    
 
+        # for n_sensor in range(1, 6):
+        for sensor in self.unassigned_sensors():
+            n_sensor = sensor.value
+
+            if self.mov_state in [
+                MovementState.BEFORE_RIGHT_RAISE,
+                MovementState.BEFORE_LEFT_RAISE,
+            ]:
+                if aggs[n_sensor - 1, 2] > -0.25 and aggs[n_sensor - 1, 0] > 0.7:
+                    if self.mov_state == MovementState.BEFORE_RIGHT_RAISE:
+                        thigh_rising = SensorPosition.RIGHT_THIGH
+                        shank_rising = SensorPosition.RIGHT_SHANK
+                        self.mov_state = MovementState.DURING_RIGHT_RAISE
+                    elif self.mov_state == MovementState.BEFORE_LEFT_RAISE:
+                        thigh_rising = SensorPosition.LEFT_THIGH
+                        shank_rising = SensorPosition.LEFT_SHANK
+                        self.mov_state = MovementState.DURING_LEFT_RAISE
+                    self.position_requester.on_sensor_position_found(
+                        Sensor(n_sensor), thigh_rising
+                    )
+                    accelerations = aggs[:, -1]
+                    max_acc_sensor = np.argsort(accelerations)[-1] + 1
+                    if max_acc_sensor == n_sensor:
+                        max_acc_sensor = np.argsort(accelerations)[-2] + 1
+                    self.position_requester.on_sensor_position_found(
+                        Sensor(max_acc_sensor), shank_rising
+                    )
+            else:
+                if (
+                    self.mov_state == MovementState.DURING_RIGHT_RAISE
+                    and aggs[n_sensor - 1, 2] < -0.7
+                    and aggs[n_sensor - 1, 0] < 0.3
+                ):
+                    self.mov_state = MovementState.BEFORE_LEFT_RAISE
+
+        if self.mov_state == MovementState.DURING_LEFT_RAISE:
+            remaining_sensor = self.unassigned_sensors()[0]
+            self.position_requester.on_sensor_position_found(
+                remaining_sensor, SensorPosition.CHEST
+            )
+            self.position_requester.on_finish()
+
+        return data_array, aggs
 
     def update_past_data(self, dict_data, data_array):
         """
@@ -73,25 +117,25 @@ class SolutionPositionFinder(SensorPositionFinder):
         vector and the acceleration value
         :param arr: the array to apend to, which contains the past data
         """
-        to_append = np.zeros((5,4))
+        to_append = np.zeros((5, 4))
 
         for sensor, values in dict_data.items():
             single_sensor = np.append(values.vec, values.acc)
-            np.reshape(single_sensor, (1,4))
-            to_append[sensor.value-1] = single_sensor
+            np.reshape(single_sensor, (1, 4))
+            to_append[sensor.value - 1] = single_sensor
 
-        if data_array.size==0:
+        if data_array.size == 0:
             data_array = to_append
-        elif np.shape(data_array) == (5,4):
+        elif np.shape(data_array) == (5, 4):
             data_array = np.stack((data_array, to_append), axis=2)
         elif np.shape(data_array)[2] < self.N:
             data_array = np.append(data_array, np.atleast_3d(to_append), axis=2)
         elif np.shape(data_array)[2] == self.N:
             data_array = np.append(data_array, np.atleast_3d(to_append), axis=2)
-            data_array = data_array[:,:,1:]
+            data_array = data_array[:, :, 1:]
         return data_array
-        
-    def data_aggregations(self, data_array):
+
+    def data_aggregations(self, data_array, chosen_agg="mean"):
         """
         Some data aggregations are necessary to implement our algorith:
         - Average x, y, z, acc values
@@ -99,59 +143,27 @@ class SolutionPositionFinder(SensorPositionFinder):
         - Columns are the values of x, y, z, a
         """
         if len(np.shape(data_array)) == 3:
-            averages = np.zeros((5,4))
-            for i in range(5):
-                averages[i,:] = [np.mean(data_array[0,0,:]),
-                            np.mean(data_array[0,1,:]),
-                            np.mean(data_array[0,2,:]),
-                            np.mean(data_array[0,3,:])]
+            aggregation = np.zeros((5, 4))
+            if chosen_agg == "mean":
+                for i in range(5):
+                    aggregation[i, :] = [
+                        np.mean(data_array[i, 0, :]),
+                        np.mean(data_array[i, 1, :]),
+                        np.mean(data_array[i, 2, :]),
+                        np.mean(data_array[i, 3, :]),
+                    ]
+            if chosen_agg == "std":
+                for i in range(5):
+                    aggregation[i, :] = [
+                        np.std(data_array[i, 0, :]),
+                        np.std(data_array[i, 1, :]),
+                        np.std(data_array[i, 2, :]),
+                        np.std(data_array[i, 3, :]),
+                    ]
         else:
-            averages = np.zeros((5,4))
-        return averages
+            aggregation = np.zeros((5, 4))
+        return aggregation
 
-    def initial_naive_solution(self,
-                             sensor_data: Dict[Sensor, SensorData], verbose=False):
-        """
-        Naive function to assign sensors to body parts (Sensor to SensorPosition)
-        It is heavily informed by the actual data we are receiving, and is not robust
-        whatsoever. It assigns the first sensor to have a positive value of z as the
-        right thigh, and if a sensor presents a positive value of z after the sample
-        number 300, it is considered as being in the left thigh. The same logic is 
-        applied for shanks, but with a value of x of -0.5. The last sensor to be 
-        assigned to any body part is considered to be in the Chest.
-        This function takes into account the number of the sample, which is increased
-        in each run.
-        :param sensor_data: a dict containing sensor data as values and the
-        corresponding sensors as keys
-        """
-
-        self.current_sample += 1
-
-        for i in range(1, 6):
-            if not Sensor(i) in self.position_requester.sensor_positions.keys():
-                if (sensor_data[Sensor(i)].vec[2] > 0) :
-                    # this sensor is on a thigh
-                    if verbose: print(f"\n\n{self.current_sample} - Detecting Right thigh by being having the first z value to reach 0")
-                    self.position_requester.on_sensor_position_found(Sensor(i), SensorPosition.RIGHT_THIGH)
-                    if self.current_sample > 300:
-                        if verbose: print(f"\n\n{self.current_sample} - Detecting Left Thigh by having z rech zero after sample 1500")
-                        self.position_requester.on_sensor_position_found(Sensor(i), SensorPosition.LEFT_THIGH)
-            
-            if not Sensor(i) in self.position_requester.sensor_positions.keys():
-                if sensor_data[Sensor(i)].vec[0] < -0.5:
-                    # this sensor is on a shank
-                    if verbose: print(f"\n\n{self.current_sample} - Detecting Right Shank by being having the first x value to reach -0.5")
-                    self.position_requester.on_sensor_position_found(Sensor(i), SensorPosition.RIGHT_SHANK)
-                    if self.current_sample > 300:
-                        if verbose: print(f"\n\n{self.current_sample} - Detecting Left Shank by having x rech -0.5 after sample 1500")
-                        self.position_requester.on_sensor_position_found(Sensor(i), SensorPosition.LEFT_SHANK)
-        
-        if len(self.position_requester.sensor_positions.keys()) == 4:
-            if verbose: print(f"\n\n{self.current_sample} - Detecting chest by being the last one remaining")
-            remaining_sensor = self.unassigned_sensors()[0]
-            self.position_requester.on_sensor_position_found(remaining_sensor, SensorPosition.CHEST)
-            self.position_requester.on_finish()
-    
     def unassigned_sensors(self):
         """
         Ouputs a list containing the sensors not yet assigned to any body part
@@ -159,13 +171,6 @@ class SolutionPositionFinder(SensorPositionFinder):
         SensorPosition
         :return: list of usassigned Sensor variables
         """
-        # TODO: find a better way to get a list of all sensors
-        all_sensors = [Sensor.SENSOR_1, Sensor.SENSOR_2, Sensor.SENSOR_3, Sensor.SENSOR_4, Sensor.SENSOR_5]
-        return list(set(CORRECT_POSITIONS.keys()) - set(self.position_requester.sensor_positions.keys()))
-
-# %%
-
-
-
-
-#for data_dict in iterate_sensor_data("resources/sensor_data.csv",5):
+        all_sensors = set(list(Sensor))
+        assigned_sensors = set(self.position_requester.sensor_positions.keys())
+        return list(all_sensors - assigned_sensors)
