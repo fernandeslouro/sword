@@ -1,10 +1,9 @@
-from tkinter import N
+from supportlib.data_types import Sensor, SensorPosition, SensorData
+from supportlib.data_types import SensorPosition
 from supportlib.sensor_position_finding import (
     SensorPositionFinder,
     SensorPositionRequester,
 )
-from supportlib.data_types import Sensor, SensorPosition, SensorData
-from supportlib.data_types import SensorPosition
 from typing import Dict
 from enum import Enum
 import numpy as np
@@ -23,6 +22,10 @@ class MovementState(Enum):
 
 class SolutionPositionFinder(SensorPositionFinder):
 
+    # Arrays where rolling windows will be stored, and setting initial movement state.
+    # We are storing rolling windows of past values of x, y, z, a, for each sensor,
+    # as well as past values of anglues between all pairs of sensors/vectors (a
+    # rolling window with values of 10 angles in total.
     past_data = np.array([])
     past_angles = np.array([])
     mov_state = MovementState(1)
@@ -31,10 +34,10 @@ class SolutionPositionFinder(SensorPositionFinder):
         """
         Constructor.
         :param position_requester: the PositionRequester to be called when
-        sensor positions are identified
+        sensor positions are identified.
         : rolling_agg: number of past sensor samples to consider when calculating
         "rolling" (i.e applied to the last N samples) aggregations, such as the mean
-        of the x, y, z and acceleration values
+        of the x, y, z and acceleration values, and the angles between vectors.
         """
         self.position_requester = position_requester
         self.rolling_agg = rolling_agg
@@ -42,22 +45,18 @@ class SolutionPositionFinder(SensorPositionFinder):
     def on_new_sensor_sample(self, sensor_data: Dict[Sensor, SensorData]) -> None:
         """
         Callback called each time a new sample is received from the sensors. When
-        it detects a sensor with values of z close to 0 and values of x close to 1,
+        it detects a patters matching a thigh raise in one of the sensors,
         it assigns the sensor to the right/left thigh, depending on whether the
         movement has been detected before (i.e. the MovementState). At the same time,
         we expect the shank of the same leg to be rising with the thigh. However,
         there is the chance the shank stays in a mostly upright position, with no
         visible change on x, y or z. However, the shank sensor would have the highest
         acceleration value of all the other sensors, so it can be identified as well.
-        In order to separate the second movement from the first, a flag is created,
-        signaling the values of e.g. x and z are still "high" because of a movement
-        already detected. When the values drop to an acceptable level again, we are
-        ready to pick up the movements of the left leg.
+        In order to separate the second movement from the first, a the movement state
+        enum is used. When the thigh is no longer raised, we areready to pick up the
+        movements of the left leg.
         All values are calculated based on a rolling mean, in order to increase
         robustness and consistency of results.
-        The past values are stored in a 3D numpy array of dimensions 5 (number of
-        sensors) x 4 (x, y, z, a) x 50 (rolling_agg). The aggregations are stored
-        in a numpy array of dimensions 5 x 4.
         :param sensor_data: a dict containing sensor data as values and the
         corresponding sensors as keys
         """
@@ -76,24 +75,20 @@ class SolutionPositionFinder(SensorPositionFinder):
                 MovementState.BEFORE_RIGHT_RAISE,
                 MovementState.BEFORE_LEFT_RAISE,
             ]:
-                # If we are in a state before a leg raise, and we detect values of z close
-                # to zero (thigh raising close to paralled) and values of x close to 1
-                # (thigh close to pointing straight forward), we can consider the leg is
-                # being raised. The sensor where these values are verified will be the thigh,
+                # If we are in a state before a leg raise, and we detect a thigh raise, The
+                # sensor where these values are verified will be assigned to the thigh,
                 # and the sensor with the highest average acceleration in the rolling window
-                # will be the shank of the same leg. These values are an heuristic, but seem
-                # to work well.
+                # will be the shank of the same leg.
                 if self.is_thigh_raised(data_aggs, angle_aggs, n_sensor):
-                    print("detected thigh raise")
                     if self.mov_state == MovementState.BEFORE_RIGHT_RAISE:
                         # If no legs have been raised yet, the raised thigh and shank are the
-                        # ones of the right leg. We also swithc to the next movement state.
+                        # ones of the right leg. We also switch to the next movement state.
                         thigh_rising = SensorPosition.RIGHT_THIGH
                         shank_rising = SensorPosition.RIGHT_SHANK
                         self.mov_state = MovementState.DURING_RIGHT_RAISE
                     elif self.mov_state == MovementState.BEFORE_LEFT_RAISE:
                         # If we are expecting the raise of the left leg and a leg is raised, we
-                        # assume it's the left leg :^)
+                        # assume it's the left leg
                         thigh_rising = SensorPosition.LEFT_THIGH
                         shank_rising = SensorPosition.LEFT_SHANK
                         self.mov_state = MovementState.DURING_LEFT_RAISE
@@ -102,23 +97,29 @@ class SolutionPositionFinder(SensorPositionFinder):
                         Sensor(n_sensor), thigh_rising
                     )
 
+                    # After assigning a sensor to the thing, we look through the remaining
+                    # sensors, and assign the one with the highest average acceleration to
+                    # the shank of the same leg
                     raised_shank_sensor = self.find_raised_shank(data_aggs, n_sensor)
 
                     self.position_requester.on_sensor_position_found(
                         Sensor(raised_shank_sensor), shank_rising
                     )
-            else:
-                if (
-                    self.mov_state == MovementState.DURING_RIGHT_RAISE
-                    and not self.is_thigh_raised(data_aggs, angle_aggs, n_sensor)
-                ):
-                    # If after raising the right leg, the right thigh sensor returns
-                    # to a position closed to vertical (on x and z), we consider that
-                    # the left leg will soon be raised. This will cause the next thigh
-                    # lift to be associated to the left leg. These values are heuristics,
-                    # but seem to work well.
-                    self.mov_state = MovementState.BEFORE_LEFT_RAISE
+            # If a leg is raised, we check for when it drops, in order to chage to a state
+            # where we can detect the left leg
+            elif (
+                self.mov_state == MovementState.DURING_RIGHT_RAISE
+                and not self.is_thigh_raised(data_aggs, angle_aggs, n_sensor)
+            ):
+                # If after raising the right leg, the right thigh sensor returns
+                # to a position closed to vertical, we consider that
+                # the left leg will soon be raised. This will cause the next thigh
+                # lift to be associated to the left leg. These values are heuristics,
+                # but seem to work well.
+                self.mov_state = MovementState.BEFORE_LEFT_RAISE
 
+        # The remaining sensor is assigned to the chest. This sensor has not shown patters
+        # consistent with thighs raisisng, and its acceleration is lower
         if self.mov_state == MovementState.DURING_LEFT_RAISE:
             remaining_sensor = self.unassigned_sensors()[0]
             self.position_requester.on_sensor_position_found(
@@ -133,18 +134,24 @@ class SolutionPositionFinder(SensorPositionFinder):
         angles_array: np.array,
     ) -> (np.array, np.array):
         """
-        Creates an array containing a rolling window of past samples' data. We
-        always take action based on rolling window aggregations as opposed to
-        individual values of samples, to add robstness. This
-        array has dimensions 5 (number of sensors) x 4 (x, y, z, a) x 50
-        (rolling_agg). We start by getting the 5 x 4 array of the current sample.
-        We then append it to the array containing the past data, which is empty
-        initially.
+        Creates two arrays containing  rolling window of past samples' vecto/acc and
+        of angles between all sensors.
+        The past values of vectors and acceleration are stored in a 3D numpy array
+        of dimensions 5 (number of sensors) x 4 (x, y, z, a) x 50 (rolling_agg) and the
+        past angle values are stored in a numpy array with dimensions 50 (rolling_agg)
+        x 10 (number of pairs of sensors, when we have 5 sensors). The aggregations are
+        stored in a numpy array of dimensions 5 x 4 for the vectors/acc, and of size 10
+        for past angles.
         :param dict_data: dictionary corresponding each sensor to the orientation
         vector and the acceleration value
-        :param arr: the array to apend to, which contains the past data
+        :param data_array: numpy array containing the rolling window of all the sensor data,
+        initially an empty array
+        :param angles_array: numpy array containinf the rolling window data of past angles
+        between all sensors, initially an empty array
+        :return: data_array, with data for the last sample appended to it
+        :return: angles_array, with data for the last sample appended to it
         """
-        # TODO: add comments related to angles
+
         data_to_append = np.zeros((N_TRACKERS, 4))
 
         # The data is extracted from the dict provided by the generator from
@@ -155,12 +162,15 @@ class SolutionPositionFinder(SensorPositionFinder):
             np.reshape(single_sensor, (1, 4))
             data_to_append[sensor.value - 1] = single_sensor
 
-        pairs = list(itertools.combinations(range(N_TRACKERS), 2))
+        # Generating the angles between all pairs of angles. angles_to_append is
+        # an array of size 10, corresponding to all angles between sensors of the latest
+        # sample.
         # Pairs are generated in a sorted manner. So we can always know where a
         # specific pair is in the numpy array.
+        pairs = list(itertools.combinations(range(N_TRACKERS), 2))
         angles_to_append = np.zeros((len(pairs)))
         for i, p in enumerate(pairs):
-            angles_to_append[i] = angle_between(
+            angles_to_append[i] = vectors_angle(
                 np.array(
                     (
                         data_to_append[p[0], 0],
@@ -177,11 +187,12 @@ class SolutionPositionFinder(SensorPositionFinder):
                 ),
             )
 
-        # Since we are starting from an empty array, the commands to joing a 5 x 4
-        # array with the previous data changes, according to the shape of the data.
+        # Since we are adding dimensions to our numpy arrays (they start out empyu),
+        #  the commands for merging arrays with the previous data change, according
+        # to the shape of the data.
         # Before data from 50 samples is present, we simply append data to the array
-        # but when the third dimension gets to 50, we must start removing the older
-        # data.
+        # but when a dimension gets to 50, we must start removing the older
+        # data. This is similar for both angles and sensor data.
         if data_array.size == 0:
             data_array = data_to_append
             angles_array = angles_to_append
@@ -202,7 +213,7 @@ class SolutionPositionFinder(SensorPositionFinder):
     def unassigned_sensors(self) -> list(Sensor):
         """
         Ouputs a list containing the sensors not yet assigned to any body part
-        :return: list of Sensor variables corresponding to sensors not yer assigned to any
+        :return: list of Sensor variables corresponding to sensors not yet assigned to any
         body segment.
         """
         all_sensors = set(list(Sensor))
@@ -217,33 +228,67 @@ class SolutionPositionFinder(SensorPositionFinder):
         method="angles",
     ) -> bool:
         """
-        Support functions to access the sliding window angles data. Since we are
-        using numpy arrays, the position of the pairs of angles is not clear. This
-        function outputs the columns which correspond to angles where the input
-        sensor is present.
-        :param angles_array: sliding window array of past angles
+        Based on rolling window data, detects wheter a sensor corresponds to a thigh
+        beimg raised.
+        :param data_aggregations: mean values of a rolling window of past sensor data
+        :param angle_aggregations: mean values of a rolling window of past data of all
+        angles between sensors
+        :param sensor_number: sensor to evaluate (we check if a specific sensor is a
+        thigh being raised)
+        :param method: method to use to check for rising thigh. Two methods were
+        implemented, 'angles' based on angles between all sensors, and 'vector_values'
+        which looks at values for specific axis. There is also the option to choose
+        "both", so that both conditions implemented for a rising thigh have to be met.
         """
+
+        # If we are in a state before a leg raise, and we detect values of z close
+        # to zero (thigh raising close to paralled) and values of x close to 1
+        # (thigh close to pointing straight forward), we can consider the leg is
         thigh_raised = True
         if method in ["angles", "both"]:
+            # The "angles" method checks for whether all the angles where a sensor is
+            # included are higher than 70 degrees. In a leg raise, the vector of the
+            # thigh is close to perpendicular with all other vectors, which are
+            # relatively close to being parallel between themselves
+
             pairs = list(itertools.combinations(range(1, N_TRACKERS + 1), 2))
             relevant_angles_indices = [
                 i for i, p in enumerate(pairs) if sensor_number in p
             ]
 
             for angle_index in relevant_angles_indices:
-                if angle_aggregations[angle_index] < 80:
+                if angle_aggregations[angle_index] < 70:
                     thigh_raised &= False
-        if method in ["vector_values", "both"]:
+        elif method in ["vector_values", "both"]:
+            # The "vector_values" method checks for a value of z higher than -0.2,
+            # simmultaneous with a value of x higher than 0.6. If both these conditions
+            # are met, we consider the thigh is raised. These values are heuristics, but
+            # seem to work well.
             if (
                 data_aggregations[sensor_number - 1, 2] < -0.2
-                or data_aggregations[sensor_number - 1, 0] < 0.7
+                or data_aggregations[sensor_number - 1, 0] < 0.6
             ):
                 thigh_raised = False
+        else:
+            raise ValueError(
+                "Possible values for 'method' include 'angles', 'vector_values' and \
+                    'both'"
+            )
 
         return thigh_raised
 
     def find_raised_shank(self, data_aggregations: np.array, n_sensor: int) -> int:
-        # We then get the average acceleration of the 5 sensors from the aggregations
+        """
+        After a thigh raise is detected, this function outputs the sensor of the shank
+        being raised. The assumption is that the shank will have the highest acceleration
+        mean in the rolling window of all the other sensors.
+        :param data_aggregation: numpy array containing the mean of sensors data (rolling)
+        :param n_sensor: sensor number of the detected rising thigh. This will be excluded
+        when looking at accelerations.
+        :return: the sensor number to be assigned to the shank
+        """
+
+        # We get the average acceleration of the 5 sensors from the aggregations
         # array, in order to find the sensor with the highest acceleration out of the
         # others.
         accelerations = data_aggregations[:, -1]
@@ -263,8 +308,9 @@ def data_aggregations(data_array: np.array, chosen_agg="mean") -> np.array:
     """
     Calculates aggregations from the numpy array containing the data of the rolling
     window of past samples. Several aggregations are implemented, such as the mean
-    and standard deviation. If there are less than two data samples worth of data in
-    data_array, the function outputs an array of zeros.
+    and standard deviation, but at the moment only the mean is used. If there are
+    less than two data samples worth of data in data_array, the function outputs an
+    array of zeros.
     :param data_array: 5 x 4 x N numpy array containing the data from the rolling
     window of past samples.
     :param chosen_agg: string with the chosen aggregation to perform on the rolling
@@ -288,8 +334,17 @@ def data_aggregations(data_array: np.array, chosen_agg="mean") -> np.array:
 
 def angle_aggregations(angles_array: np.array, chosen_agg="mean") -> np.array:
     """
+    Calculates aggregations from the numpy array containing the data of the rolling
+    window of past amgles. Several aggregations are implemented, such as the mean
+    and standard deviation, but at the moment only the mean is used. If there are
+    less than two data samples worth of data in data_array, the function outputs an
+    array of zeros.
+    :param angles_array: N x 10 numpy array containing the data from the rolling
+    window of past samples.
     :param chosen_agg: string with the chosen aggregation to perform on the rolling
-    :return:
+    window data.
+    :return: a size 10 array with the containing the results of the chosed aggregation
+    performed on the rolling window data.
     """
     aggregation = np.zeros((10))
 
@@ -303,12 +358,14 @@ def angle_aggregations(angles_array: np.array, chosen_agg="mean") -> np.array:
     return aggregation
 
 
-def angle_between(v1, v2, deg=True):
+def vectors_angle(v1, v2, deg=True):
     """
-    Calculates the angle between two 3D vectors. It starts by
-    calculating the unit vector of each vector.
-    :param v1: the first vector
-    :param v2: the second vector
+    Calculates the angle between two 3D vectors. It starts by calculating the unit
+    vector of each vector.
+    :param v1: the first vector.
+    :param v2: the second vector.
+    :param deg: whether the result should be in degrees. If false, output is is
+    radians.
     :return; the angle between vectors 'v1' and 'v2':
     """
     v1_u = v1 / np.linalg.norm(v1)

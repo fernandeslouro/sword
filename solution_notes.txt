@@ -1,0 +1,109 @@
+=== General Approach ===
+
+Overall logic of the approach:
+1. When a thigh raise is detected, assign sensor to right thigh.
+2. Of the other sensors, the one with the highest acceleration will be the left
+shank.
+3. When thigh raise is no longer detected, the next thigh raise detected will
+be the left leg.
+4. When a thigh raise is detected, assign sensor to left thigh.
+5. Sensor with the highest acceleration will be the left shank.
+6. Remaining sensor is assigned to chest.
+
+= Additional Details on Implementation =
+
+At every new sample, the program loops through the yet unassigned sensors, and evaluates 
+whether the thigh has been raised. For the detection of the thigh, two different 
+approaches were taken:
+ - "angles" approach: a sensor is considered to belong to a risen thigh if its
+    angles with all other sensors are larger than 70 degrees;
+ - "vector_values" approach: a sensor can be assigned to a risen thigh if its
+   value of x is over 0.6, and its value of of z is over -0.2
+
+After a rising thigh has been detected, and the thigh has been assigned to
+a specific sensor, we assign a sensor to the shank of the same leg. We assume
+that the shank will show the highest mean acceleration of all the other sensors,
+and that is how it is detected. All these values are calculated using means over 
+rolling window data, which is further explained later.
+
+At the same time, the program keeps a state, which can take a total of 4
+different values. This state holds information on whether any leg raise has been
+detected, and whether a leg is raised at the moment. So, if the state is
+BEFORE_RIGHT_RAISE and a thigh raise is detected, we assign the sensor showing
+patterns matching the thigh raise to the right thigh, and the shank detected based
+on acceleration values to the right shank. The state also changes to
+DURING_RIGHT_RAISE. After a leg raise is no longer being detected, the state
+switches to BEFORE_LEFT_RAISE, and if a thigh lift is detected after, its
+sensor will be assigned to the left thigh, and the sensor with the highest
+acceleration will be assigned to the left shank. The state is now
+DURING_LEFT_RAISE. After the left shank is assigned, the remaining sensor is
+assigned to the Chest, and the on_finish callback is activated.
+
+
+= Note on Rolling Windows =
+
+One decision made in my implementation was to use rolling windows,
+and act on aggregations of data of those rolling windows, instead of on the data
+values themselves. What this means is that the program keeps the data of the
+latest N samples stored and ready to access, and that all decisions are made
+based on aggregations on this data (specifically, the mean). This increases the
+robustness of the decisions.
+
+
+= Note on opening the leg to the side =
+
+The program will be robust to the patient opening the leg to the side. The
+program starts by detecting a thigh raise, and the movement patters of the side
+raise are not picked up as a thigh raise by any of the approaches I followed. 
+
+Regarding the "angles" approach, the angles between body segments created by the
+side raise are not enough to be detected as a thigh raise. As for the
+"vector_values" approach, the thigh raise is detected based on movement on the x 
+and z axis. This movement has negligible changes in the x axis, and the changes
+in the z axis are not enough to trigger the thigh detection.
+
+This applies to a leg raise performed at the beginning or between the two leg
+raises.
+
+
+= Assumptions  =
+
+ - "angles" approach: During a leg raise, the thigh will have an angle higher than
+70 degrees with all the other vectors
+ - "vector_values" approach: During a leg raise, the thigh will have a value of
+   x higher that 0.6 and a value of z higher than -0.2
+ - During a leg raise, the sensor with the highest acceleration is the shank
+   sensor. Given the indicated placement of the sensor in the shank, it
+   intuitively seems unlikely that any of the other sensors would have higher
+   acceleration during a leg raise. This is backed by the data we were provided
+   with.
+ - There is the stated assumption that the right leg is raised first, which if
+   taken into account.
+ - I assume the right leg will lower before the left leg rises
+
+
+= Potential shortcomings of the solutions = 
+
+ - Admittedly, my solutions were perhaps too heavily informed by the data I 
+ was provided with. This is a single repetition of a movement, performed in
+ specific conditions. Had I taken this challenge again, I would consider not
+ looking at the data in order not to get biased by the specific patters of the
+ that movement.
+ - "vector_values" solution:
+ 	- if the patient raises their leg to the side, instead of mostly facing
+	  north, the thigh raise is not detected. This is because a value of x
+	  over 0.6 is expected. This value could very likely be lowered with no
+	  consequences on the performance on thigh raise detection. It was
+	  considered detecting the thigh raise trusting solely on the x value
+	  coming close to zero, but the choice was made to have weaker
+	  conditions on two separate angles than relying on a single read.
+	- If the leg raise is very low, the z value will not go below -0.2, and
+	  the thigh raise will not be detected. Regarding this, expectations
+	  must be aligned with the patient and, if necessary, the expected height
+	  of the thigh can be lowered.
+- "angles" approach:
+    - If e.g. the patient's torso leans forward while raising the leg, and the
+      leg is raised high, the final angle between the thigh and the chest
+      vectors my be less than the chosen threshold, and the leg raise could be
+      missed by the program.
+
